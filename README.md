@@ -121,7 +121,7 @@ Traditional smart contract audits focus on:
 |----------------------|-------------|
 | Overflow/underflow reverts | Silently wraps to prevent info leakage |
 | View functions are safe | Decryption can leak state |
-| Gas costs are predictable | FHE operations are 1000x+ more expensive |
+| Gas costs are predictable | FHE operations 100-10,000x more expensive (addition: ~100-200x, multiplication: ~1,000-5,000x, comparisons: ~500-2,000x) |
 | All state is public | Encrypted state requires permission to read |
 
 ### New Attack Surfaces
@@ -152,6 +152,7 @@ flowchart LR
 3. **Confidential Tokens (FHERC20)**
    - Hidden balances and transfer amounts
    - Compliant with regulatory requirements
+   - *Note: FHERC20 is a proposed naming convention for confidential tokens on FHE-enabled chains, analogous to ERC20 but with encrypted balances. No formal EIP standard exists yet.*
 
 4. **Sealed-Bid Auctions**
    - Bids remain encrypted until reveal
@@ -209,9 +210,9 @@ Find $s$. This problem is believed to be hard even for quantum computers.
 |--------|-----------|--------|-------|----------|
 | **BGV** | Integers | ✅ | Medium | General computation |
 | **BFV** | Integers | ✅ | Medium | Smart contracts |
-| **CKKS** | Approx. numbers | ❌ | Fast | ML/Analytics |
+| **CKKS** | Approx. floats | ❌ (~10-20 bits) | Fast | ML/Analytics |
 | **TFHE** | Bits/small ints | ✅ | Fast bootstrap | Fhenix, Zama |
-| **dBFV** | Integers | ✅ High precision | Medium | Fhenix (new) |
+| **dBFV** | Integers | ✅ Exact | Medium | Fhenix (optimized noise) |
 
 ### TFHE (Torus FHE)
 
@@ -235,8 +236,9 @@ Fhenix's novel scheme from their [white paper](https://eprint.iacr.org/2025/2321
 
 **Subfield Lattice Attack:**
 - Affects NTRU-based schemes with poor parameter choices
-- LTV and BLLN schemes are deprecated due to this
-- **Audit check**: Verify scheme is not using overstretched NTRU
+- **Historical Note**: LTV (Lopez-Alt et al., 2012) and BLLN (Brakerski-Langlois-Lepoint-Naehrig, 2013) were early FHE schemes broken by subfield lattice attacks in 2015-2016
+- Modern schemes (TFHE, BGV, BFV, CKKS) use different algebraic structures and parameter regimes
+- **Audit check**: Verify scheme is not using deprecated constructions (LTV, BLLN, overstretched NTRU)
 
 **Dual Lattice Attack:**
 - Exploits weak modulus-to-dimension ratios
@@ -262,9 +264,10 @@ FHE ciphertexts contain "noise" that grows with each operation:
 
 ```
 Initial encryption:     noise = small
-After addition:         noise = noise1 + noise2
-After multiplication:   noise = noise1 × noise2 (grows fast!)
-After too many ops:     DECRYPTION FAILS (or worse, leaks info)
+After addition:         noise ≈ noise1 + noise2
+After multiplication:   noise ≈ (noise1 × plaintext2) + (noise2 × plaintext1) + (noise1 × noise2)
+                        ^ Grows proportional to BOTH noise AND plaintext values!
+After too many ops:     DECRYPTION FAILS (or worse, returns incorrect result)
 ```
 
 **Vulnerabilities:**
@@ -287,17 +290,16 @@ After too many ops:     DECRYPTION FAILS (or worse, leaks info)
 
 Standard FHE security guarantee:
 - Attacker cannot distinguish encryptions of different messages
-- Does NOT protect against chosen ciphertext attacks
+- Does NOT protect against chosen ciphertext attacks (IND-CCA)
+- FHE schemes are inherently malleable and typically achieve only IND-CPA security
 
-### IND-CPAD (with Decryption queries)
-
-Stronger model accounting for:
-- Adaptive queries to a decryption oracle
-- Malleability of ciphertexts
-- Zama targets 128-bit security under this model
+**Security Level**: Modern FHE implementations target 128-bit IND-CPA security:
+- Based on quantum-resistant lattice assumptions (LWE/RLWE)
+- Resistant to all known classical and quantum attacks
+- Zama and Fhenix both target 128-bit security parameters
 
 > [!WARNING]
-> **Limitation**: FHE is inherently malleable. An attacker can modify ciphertexts to compute on the underlying data. This is a feature, not a bug, but requires careful access control.
+> **Fundamental Limitation**: FHE is inherently malleable. An attacker can modify ciphertexts to compute on the underlying data without knowing the plaintext. This is by design (enabling computation), but requires careful access control and authentication mechanisms at the application layer.
 
 ---
 
@@ -328,6 +330,18 @@ graph TB
     C --> H
 ```
 
+### Stack Components
+
+**Concrete**: Zama's domain-specific language (DSL) and compiler for FHE. It allows developers to write high-level FHE programs that compile to optimized TFHE operations. Concrete provides:
+- High-level API for expressing encrypted computations
+- Automatic parameter selection and optimization
+- Noise budget tracking and management
+- Compilation to efficient TFHE-rs operations
+
+**TFHE-rs**: High-performance Rust implementation of TFHE primitives, providing the cryptographic foundation.
+
+**fhEVM**: Modified Ethereum Virtual Machine supporting FHE operations via precompiles.
+
 ### Security Audit Coverage
 
 Zama's protocol underwent **~70 audit-weeks** covering:
@@ -350,11 +364,12 @@ Zama's protocol underwent **~70 audit-weeks** covering:
 
 ### Side-Channel Considerations
 
-| Attack Vector | TFHE-rs Mitigation |
-|--------------|-------------------|
-| Timing attacks | Constant-time implementations |
-| Power analysis | Noise addition, operation masking |
-| Cache attacks | Memory access pattern obfuscation |
+| Attack Vector | TFHE-rs Status | Notes |
+|--------------|----------------|-------|
+| Timing attacks | Partial mitigation | Core operations constant-time; bootstrapping reveals circuit depth |
+| Power analysis | Hardware-dependent | Standard DPA countermeasures applied at hardware level |
+| Cache attacks | Active research | Memory access pattern obfuscation; not guaranteed secure |
+| Electromagnetic | Hardware-dependent | Requires physical access; standard shielding practices |
 
 > [!NOTE]
 > **Audit Tip**: When auditing TFHE-rs integrations, verify that wrapper code doesn't introduce timing variations (e.g., early returns on error conditions).
@@ -425,17 +440,22 @@ sequenceDiagram
 
 ### 128-bit Security Target
 
-Zama targets **128-bit security** under the strong IND-CPAD model:
-- Resistant to all known classical attacks
-- Resistant to known quantum attacks (Grover, Shor)
-- Formally verified parameter selection
+Zama targets **128-bit IND-CPA security** based on lattice assumptions:
+- Resistant to all known classical attacks (lattice reduction, dual attacks)
+- Based on quantum-resistant LWE/RLWE assumptions (secure against Shor's algorithm)
+- Parameters sized to maintain 128-bit security against Grover's quadratic speedup
+- Formally verified parameter selection using lattice estimator tools
 
 ### Known Limitations
 
-1. **Decryption latency**: Threshold decryption adds network delay
+1. **Decryption latency**: Threshold decryption adds network delay (typically 1-5 seconds)
 2. **Ciphertext size**: ~1KB per encrypted value (storage cost)
-3. **Operation cost**: ~100x-1000x more gas than plaintext operations
-4. **Bootstrapping requirements**: Deep computations need periodic refresh
+3. **Operation cost**: Variable by operation type:
+   - Addition/Subtraction: ~100-200x more gas than plaintext
+   - Multiplication: ~1,000-5,000x more gas
+   - Comparisons/Select: ~500-2,000x more gas
+   - Bootstrapping (if needed): ~10,000x+ more gas
+4. **Bootstrapping requirements**: Deep computations need periodic noise refresh
 
 ---
 
@@ -530,8 +550,9 @@ contract ConfidentialToken {
 ```
 
 **Security Patterns:**
-- Use `FHE.select()` instead of if/else (prevents branch-based leakage)
-- Never compare encrypted values in require statements
+- Use `FHE.select()` for conditional logic on confidential data (prevents branch-based leakage)
+- Avoid decrypting values in require/assert if it would leak confidential information
+- Decryption is acceptable when the value is intentionally being revealed (e.g., final auction results)
 - Always check ACL permissions before operations
 
 ### FHE Coprocessor Security
@@ -589,10 +610,14 @@ sequenceDiagram
 
 ### Byzantine Fault Tolerance
 
-**Threshold Configuration:**
-- Typical: 2-of-3 or 3-of-5
-- Liveness: Requires t+1 honest nodes
-- Safety: Requires n-t honest nodes
+**Threshold Configuration (t-of-n):**
+- **Threshold**: t signatures required to decrypt
+- **Total nodes**: n nodes in the network
+- **Liveness**: Requires at least **t honest nodes available** to complete decryption
+- **Safety**: Requires **fewer than t nodes compromised** to prevent unauthorized decryption
+- **Example**: In 2-of-3 setup:
+  - Can tolerate 1 node failure (liveness: 2 nodes can still decrypt)
+  - Prevents compromise if only 1 node is malicious (safety: need 2 to decrypt)
 
 **Key Compromise Scenarios:**
 
@@ -685,6 +710,8 @@ function calculateFee(euint64 amount) public returns (euint64) {
 **The Problem:**
 Contracts may grant decrypt permissions to helpers without validating the original caller's permissions.
 
+**Root Cause**: The function accepts a ciphertext handle from the caller without verifying the caller has permission to use it. This allows attackers to pass ciphertext handles they don't own but have observed (e.g., from blockchain events, transaction logs, or contract storage). The vulnerability creates a **permission amplification** attack where the contract unwittingly grants its own access rights to unauthorized parties.
+
 **Vulnerable Pattern:**
 
 ```solidity
@@ -740,6 +767,8 @@ graph LR
 - [ ] All `FHE.allow()` calls preceded by permission checks
 - [ ] Transient permissions preferred over persistent
 - [ ] Helper contracts audited for decrypt calls
+- [ ] Callbacks authenticated via modifier checking msg.sender
+- [ ] Gateway address immutable and set at deployment
 
 ## Category 3: Asynchronous Decryption Vulnerabilities
 
@@ -771,8 +800,22 @@ function withdrawCallback(bytes32 reqId, uint64 decryptedAmount) external {
 **Secure Pattern:**
 
 ```solidity
-// ✅ SECURE: Invalidate before external call
-function withdrawCallback(bytes32 reqId, uint64 decryptedAmount) external {
+// ✅ SECURE: Invalidate before external call + authenticate caller
+address public immutable AUTHORIZED_GATEWAY;
+
+constructor(address _gateway) {
+    AUTHORIZED_GATEWAY = _gateway;
+}
+
+modifier onlyGateway() {
+    require(msg.sender == AUTHORIZED_GATEWAY, "Unauthorized callback");
+    _;
+}
+
+function withdrawCallback(bytes32 reqId, uint64 decryptedAmount) 
+    external 
+    onlyGateway  // Critical: Only gateway can call
+{
     WithdrawRequest memory req = requests[reqId];
     require(req.user != address(0), "Invalid or used request");
     
@@ -961,7 +1004,8 @@ Before deploying any FHE smart contract:
 │ [ ] All FHE arithmetic operations have overflow guards      │
 │ [ ] ACL permissions use transient where possible           │
 │ [ ] Async callbacks invalidate state before external calls │
-│ [ ] No require/assert on encrypted comparisons             │
+│ [ ] Async callbacks authenticated with onlyGateway modifier│
+│ [ ] Avoid decrypt in require/assert for confidential data  │
 │ [ ] Auction logic compares transferred, not requested      │
 │ [ ] No arbitrary external calls in privileged contexts     │
 │ [ ] Finality delays on sensitive reveals                   │
@@ -977,9 +1021,9 @@ Before deploying any FHE smart contract:
 |------|---------------|
 | `FHE.allow()` | Is caller permission verified? Transient preferred? |
 | `FHE.select()` | Are both branches safe? No info leak in selection? |
-| Callbacks | State invalidated? Gateway-only callable? |
+| Callbacks | State invalidated? Gateway-only callable? Authentication enforced? |
 | Arithmetic | Overflow guards? Clamping strategies? |
-| Comparisons | Never in require/assert? |
+| Comparisons | Avoid decrypt in require/assert if leaking confidential data? |
 | External calls | Blocklisted sensitive targets? |
 
 ### Testing Strategies for Encrypted Logic
@@ -1159,7 +1203,8 @@ contract SecurePrivateVoting {
         
         hasVoted[proposalId][msg.sender] = true;
         
-        // Add 1 to yes or no based on encrypted vote
+        // Convert bool to uint64 for arithmetic
+        euint64 voteAsUint = FHE.asEuint64(encryptedVote);
         euint64 one = FHE.asEuint64(1);
         euint64 zero = FHE.asEuint64(0);
         
@@ -1560,11 +1605,11 @@ For critical FHE contracts, consider:
 | Threat | FHE Status | Timeline |
 |--------|------------|----------|
 | Shor's Algorithm | ✅ Safe (lattice-based) | N/A |
-| Grover's Algorithm | ⚠️ May need larger parameters | 10-15 years |
+| Grover's Algorithm | ✅ Mitigated (256-bit key space) | Already addressed |
 | Unknown quantum attacks | ? | Unknown |
 
 > [!NOTE]
-> Current FHE schemes are believed to be quantum-resistant, but parameter sizes may need to increase as quantum computers advance.
+> Current FHE schemes are quantum-resistant. Grover's algorithm provides quadratic speedup (reducing 256-bit security to 128-bit against quantum computers), which is why modern implementations use 256-bit key spaces to maintain 128-bit post-quantum security. This is already accounted for in current parameter selections.
 
 ### Scalability vs Security Trade-offs
 
