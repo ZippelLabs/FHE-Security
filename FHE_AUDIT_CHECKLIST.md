@@ -309,20 +309,62 @@ Security Target    | Min Dimension (n) | Typical q (log2)
 | LWE Benchmarking | Attack benchmarking | [GitHub](https://github.com/facebookresearch/LWE-benchmarking) |
 | IND-CPA-D Attacks | CPAD vulnerability testing | [GitHub](https://github.com/hmchoe0528/INDCPAD_HE_ThresFHE) |
 
-### 10.2 Security Audit Actions
+### 10.2 Concrete Lattice Estimator Usage
 
-1. **Run Lattice Estimator** on all parameter sets
-2. **Verify security margins** against published attack costs
-3. **Test CPAD vulnerabilities** if using approximate FHE
-4. **Review library versions** for known CVEs
-5. **Benchmark timing** for side-channel assessment
+**Installation:**
+```bash
+git clone https://github.com/malb/lattice-estimator.git
+cd lattice-estimator
+sage -pip install -r requirements.txt
+```
 
-### 10.3 Documentation Review
+**Example: Verify 128-bit Security for TFHE-rs Parameters**
+```python
+# Run in SageMath
+from estimator import *
+
+# TFHE-rs typical parameters
+n = 2048       # LWE dimension
+q = 2**64      # Ciphertext modulus
+sigma = 3.19   # Standard deviation of error
+
+# Estimate security
+params = LWE.Parameters(n=n, q=q, Xs=ND.UniformMod(2), Xe=ND.DiscreteGaussian(sigma))
+result = LWE.estimate(params, red_cost_model=RC.BDGL16)
+
+# Output: Dictionary of attack costs
+# Look for: "rop" (ring operations) - should be >= 2^128
+print(f"Estimated security: {min(r['rop'] for r in result.values() if 'rop' in r):.1f} bits")
+```
+
+**What to Check:**
+- `rop` (ring operations) >= 2^128 for 128-bit security
+- Compare `usvp`, `dual`, `bdd` attack costs
+- Watch for sparse/ternary secret warnings
+
+**Red Flags:**
+| Indicator | Issue | Action |
+|-----------|-------|--------|
+| Security < 128 bits | Parameters too weak | Recommend parameter update |
+| Large gap between attacks | Possible optimization | Investigate specific attack vector |
+| Non-standard distributions | May invalidate estimates | Consult cryptographer |
+
+### 10.3 Security Audit Actions
+
+1. **Extract parameters** from library configuration (e.g., `fhe_params.json`, Cargo.toml)
+2. **Run Lattice Estimator** on all parameter sets
+3. **Verify security margins** against published attack costs
+4. **Test CPAD vulnerabilities** if using approximate FHE or threshold decryption
+5. **Review library versions** against [awesome-fhe-attacks](https://github.com/Hexens/awesome-fhe-attacks) CVE list
+6. **Benchmark timing** for side-channel assessment
+
+### 10.4 Documentation Review
 
 - [ ] Security claims documented and verifiable
-- [ ] Parameter choices justified with security estimates
-- [ ] Known limitations explicitly stated
+- [ ] Parameter choices justified with lattice estimator runs
+- [ ] Known limitations explicitly stated (see Chapter 9 of Handbook)
 - [ ] Threat model clearly defined
+- [ ] Noise flooding parameters documented (for threshold FHE)
 
 ---
 

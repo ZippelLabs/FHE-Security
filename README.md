@@ -16,7 +16,8 @@
 6. [Chapter 6: Security Best Practices](#chapter-6-security-best-practices--secure-design-patterns)
 7. [Chapter 7: Auditing FHE Protocols](#chapter-7-auditing-fhe-protocols---a-security-engineers-guide)
 8. [Chapter 8: Ecosystem & Research](#chapter-8-ecosystem-research--future-directions)
-9. [Appendices](#appendices)
+9. [Chapter 9: Open Research Problems](#chapter-9-open-research-problems--limitations)
+10. [Appendices](#appendices)
 
 ---
 
@@ -179,32 +180,192 @@ flowchart LR
 
 # Chapter 2: Cryptographic Foundations & Security Properties
 
-## Mathematical Prerequisites
+## Formal Security Definitions
 
-### Lattice-Based Cryptography
+Understanding FHE security requires precise definitions. These game-based formulations are directly relevant to auditing Zama, Fhenix, and Web3 protocols.
 
-FHE security relies on the hardness of lattice problems, primarily:
+### IND-CPA: Indistinguishability under Chosen Plaintext Attack
 
-**Learning With Errors (LWE):**
-Given samples $(a_i, b_i = \langle a_i, s \rangle + e_i)$ where:
-- $a_i$ is a random vector
-- $s$ is a secret vector
-- $e_i$ is small "noise"
+The **baseline security guarantee** claimed by all FHE schemes (Zama TFHE-rs, Fhenix dBFV/TFHE).
 
-Find $s$. This problem is believed to be hard even for quantum computers.
+**Security Game $\text{Exp}^{\text{IND-CPA}}_{\Pi,\mathcal{A}}(b)$:**
 
-**Ring-LWE:** A more efficient variant operating over polynomial rings.
+```
+1. Challenger generates (pk, sk) ← KeyGen(λ)
+2. Adversary A receives pk
+3. A submits two messages m₀, m₁ of equal length
+4. Challenger computes c* ← Encrypt(pk, m_b) for random bit b
+5. A outputs guess b'
+6. A wins if b' = b
+```
 
-### Security Assumptions
+**Advantage:** $\text{Adv}^{\text{IND-CPA}}_{\Pi}(\mathcal{A}) = \left| \Pr[b' = 1 \mid b = 1] - \Pr[b' = 1 \mid b = 0] \right|$
 
-| Assumption | Description | Quantum Secure? |
-|------------|-------------|-----------------|
-| LWE | Learning With Errors | ✅ Yes |
-| RLWE | Ring-LWE | ✅ Yes |
-| NTRU | Number Theory Research Unit | ⚠️ Variants differ |
+**Zama/Fhenix Relevance:**
+- ✅ Encrypted balances are indistinguishable (attacker can't tell Encrypt(1000) from Encrypt(5000))
+- ✅ Sealed bids in auctions remain private
+- ✅ DAO votes cannot be distinguished
 
 > [!NOTE]
-> **For Security Engineers**: Always verify the specific lattice parameters used. Older schemes used "overstretched" NTRU parameters vulnerable to subfield attacks.
+> A scheme is IND-CPA secure if $\text{Adv}^{\text{IND-CPA}}_{\Pi}(\mathcal{A}) \leq \text{negl}(\lambda)$ for all PPT adversaries $\mathcal{A}$.
+
+---
+
+### IND-CCA: Why FHE Cannot Achieve CCA Security
+
+**IND-CCA1** (non-adaptive) and **IND-CCA2** (adaptive) provide decryption oracle access:
+
+```
+Additional Phase (CCA):
+- A can submit ciphertexts c ≠ c* to decryption oracle
+- Receives Decrypt(sk, c) for each query
+```
+
+**Why FHE is Inherently CCA-Insecure:**
+
+FHE's homomorphic property creates an unavoidable attack:
+
+```
+Attack:
+1. Receive challenge ciphertext c* = Encrypt(m)
+2. Compute c' = FHE.add(c*, Encrypt(1)) = Encrypt(m + 1)
+3. Query decryption oracle: Decrypt(c') = m + 1
+4. Recover m = (m + 1) - 1  ✓
+```
+
+**Web3 Implication:** This is why **ACL (Access Control Lists)** are critical in fhEVM and CoFHE—the cryptography alone cannot prevent unauthorized computation on ciphertexts.
+
+---
+
+### IND-CPAD: The Critical 2024 Threat Model
+
+**IND-CPAD** (Chosen Plaintext Attack with Decryption) is directly relevant to **threshold decryption networks** used by Zama KMS and Fhenix TDN.
+
+**Security Game $\text{Exp}^{\text{IND-CPAD}}_{\Pi,\mathcal{A}}(b)$:**
+
+```
+Standard IND-CPA game, but:
+- A receives decryption OUTPUTS (not oracle access)
+- Decrypted values may contain residual noise information
+- This noise can leak the secret key!
+```
+
+**Attack Mechanics (Li-Micciancio 2021, Guo et al. 2024):**
+
+For approximate schemes (CKKS) and threshold decryption:
+
+1. Observe decryption output $m' = m + e$ where $e$ is residual noise
+2. Collect multiple $(c_i, m'_i)$ pairs
+3. Solve system of equations to recover secret key $s$
+4. **2024 USENIX Result**: Key recovery from **single decryption output** possible!
+
+**Concrete Attack Complexity:**
+
+| Scheme | Decryptions Needed | Time | Reference |
+|--------|-------------------|------|-----------|
+| CKKS (no flooding) | 1 | seconds | [Guo et al. 2024](https://www.usenix.org/system/files/sec24summer-prepub-822-guo.pdf) |
+| BFV/BGV (imperfect) | ~100-1000 | < 1 hour | [ePrint 2024/127](https://eprint.iacr.org/2024/127) |
+| TFHE (error injection) | varies | varies | [ePrint 2022/1563](https://eprint.iacr.org/2022/1563) |
+
+**Mitigation (Required for Production):**
+
+```
+Noise Flooding: Before revealing decrypted value, add noise σ_flood where:
+  σ_flood >> B_max × 2^λ
+  
+Where:
+  B_max = maximum noise bound after computation
+  λ = security parameter (e.g., 128)
+```
+
+> [!CAUTION]
+> **Audit Requirement**: Verify Zama/Fhenix implementations use **worst-case noise estimation** for flooding. Average-case estimation was bypassed in the 2024 USENIX attack.
+
+---
+
+## Mathematical Prerequisites
+
+### Lattice-Based Cryptography: Formal Definitions
+
+FHE security reduces to the hardness of lattice problems. Understanding these is essential for parameter validation.
+
+**Learning With Errors (LWE) Problem:**
+
+Given $m$ samples $(a_i, b_i) \in \mathbb{Z}_q^n \times \mathbb{Z}_q$ where:
+
+$$b_i = \langle a_i, s \rangle + e_i \pmod{q}$$
+
+with:
+- $a_i \leftarrow \mathbb{Z}_q^n$ uniformly random
+- $s \leftarrow \chi_s$ (secret distribution, typically Gaussian or uniform small)
+- $e_i \leftarrow \chi_e$ (error distribution, typically discrete Gaussian with std dev $\sigma$)
+
+**Decision-LWE**: Distinguish $(A, As + e)$ from $(A, u)$ where $u$ is uniform random.
+
+**Search-LWE**: Recover $s$ given $(A, As + e)$.
+
+**Reduction**: Decision-LWE $\leq_P$ Search-LWE (polynomial-time reduction exists).
+
+---
+
+**Ring-LWE (RLWE):**
+
+More efficient variant operating over polynomial rings:
+
+$$R_q = \mathbb{Z}_q[X] / (X^n + 1)$$
+
+where $n$ is a power of 2 (cyclotomic polynomial).
+
+Samples: $(a, b = a \cdot s + e) \in R_q \times R_q$
+
+**Efficiency Gain**: Polynomial multiplication via NTT in $O(n \log n)$.
+
+---
+
+### Concrete Security Estimation
+
+Security is measured in **bits of security** based on the best known attacks.
+
+**Lattice Estimator Formula:**
+
+For LWE with parameters $(n, q, \sigma)$, security is approximately:
+
+$$\lambda \approx \frac{n \cdot \log_2(q/\sigma)}{\log_2(\delta)}$$
+
+where $\delta$ is the **root-Hermite factor**:
+- $\delta \approx 1.004$ for 128-bit security
+- $\delta \approx 1.003$ for 192-bit security
+- $\delta \approx 1.002$ for 256-bit security
+
+**Production Parameter Sets:**
+
+| Implementation | Ring Dim (n) | log₂(q) | σ | Security (bits) | Source |
+|----------------|--------------|---------|---|-----------------|--------|
+| TFHE-rs (Zama) | 2048 | 64 | 3.19 | ~128 | [TFHE-rs docs](https://docs.zama.ai/tfhe-rs) |
+| Fhenix CoFHE | 4096 | 109 | 3.2 | ~128 | [Fhenix docs](https://docs.fhenix.io/) |
+| OpenFHE default | 4096 | 54 | 3.19 | ~128 | [OpenFHE docs](https://openfhe.org/) |
+| HE Standard | 2048+ | varies | 3.2 | 128+ | [HomomorphicEncryption.org](https://homomorphicencryption.org/standard/) |
+
+**NIST PQC Alignment (2024):**
+
+NIST's post-quantum standards (FIPS 203/204/205) use similar lattice assumptions:
+- FHE parameters generally **exceed** NIST Category 1 (128-bit) requirements
+- Same resistance to Grover's algorithm (quadratic speedup mitigated by parameter sizing)
+
+> [!IMPORTANT]
+> **Audit Verification**: Use the [Lattice Estimator](https://github.com/malb/lattice-estimator) to independently verify claimed security levels. Do not trust library documentation alone.
+
+### Security Assumptions Summary
+
+| Assumption | Formal Definition | Quantum Secure? | Used By |
+|------------|------------------|-----------------|---------|
+| LWE | Decision-LWE hard | ✅ Yes | BGV, BFV, CKKS |
+| RLWE | Ring variant of LWE | ✅ Yes | All efficient schemes |
+| NTRU | Short vector in NTRU lattice | ⚠️ Depends on params | Some older schemes |
+| AGCD | Approximate GCD | ✅ Believed | DGHV (historical) |
+
+> [!NOTE]
+> **For Security Engineers**: Always verify the specific lattice parameters used. Older schemes used "overstretched" NTRU parameters vulnerable to subfield attacks (broken 2015-2016).
 
 ## FHE Schemes Overview
 
@@ -216,7 +377,7 @@ Find $s$. This problem is believed to be hard even for quantum computers.
 | **BFV** | Integers | ✅ | Medium | Smart contracts | [ePrint 2012/144](https://eprint.iacr.org/2012/144) |
 | **CKKS** | Approx. floats | ❌ (~10-20 bits) | Fast | ML/Analytics | [ASIACRYPT 2017](https://link.springer.com/chapter/10.1007/978-3-319-70694-8_15) |
 | **TFHE** | Bits/small ints | ✅ | Fast bootstrap | Fhenix, Zama | [J. Cryptol. 2019](https://link.springer.com/article/10.1007/s00145-019-09319-x) |
-| **dBFV** | Integers | ✅ Exact | Medium | Fhenix (optimized noise) | [ePrint 2025/2321](https://eprint.iacr.org/2025/2321) |
+| **dBFV** | Integers | ✅ Exact | Medium | High-precision exact FHE | Research papers |
 
 ### TFHE (Torus FHE)
 
@@ -228,11 +389,14 @@ Used by both Zama and Fhenix. Key properties:
 
 ### dBFV (Decomposed BFV)
 
-Fhenix's novel scheme from their [white paper](https://eprint.iacr.org/2025/2321):
+A technique for high-precision exact FHE:
 
 - **High precision**: Exact arithmetic without approximation errors
-- **Decomposed operations**: Better noise management
-- **Optimized for smart contracts**: Reduced gas costs
+- **Decomposed operations**: Better noise management through digit decomposition
+- **Optimized for smart contracts**: Improved error rates compared to standard BFV
+
+> [!NOTE]
+> For Fhenix's specific implementation details and their Threshold FHE Decryption protocol, see their [official documentation](https://docs.fhenix.io/) and the [CCS 2025 paper on Threshold FHE](https://eprint.iacr.org/2025/2486).
 
 ## Common Cryptographic Vulnerabilities
 
@@ -273,48 +437,99 @@ Recent research (2024) has demonstrated practical key recovery against major FHE
 > [!CAUTION]
 > **Security Engineers**: Always verify the library version. Many attacks have been patched in recent releases. Check CVE databases and library changelogs. See [Zellic's Key Recovery Analysis](https://www.zellic.io/blog/fhe-key-recovery) for practical implications.
 
-### 3. Noise Management Failures
+### 3. Noise Growth Analysis (Formal)
 
-FHE ciphertexts contain "noise" that grows with each operation:
+FHE ciphertexts contain "noise" $e$ that grows with each operation. Understanding noise growth is critical for both security and correctness.
 
-```
-Initial encryption:     noise = small
-After addition:         noise ≈ noise1 + noise2
-After multiplication:   noise ≈ (noise1 × plaintext2) + (noise2 × plaintext1) + (noise1 × noise2)
-                        ^ Grows proportional to BOTH noise AND plaintext values!
-After too many ops:     DECRYPTION FAILS (or worse, returns incorrect result)
-```
+**Ciphertext Structure:**
 
-**Vulnerabilities:**
-- **Noise overflow**: Incorrect decryption without error indication
-- **Noise-based distinguishers**: CKKS approximate values can leak bits
-- **Bootstrapping failures**: Can corrupt ciphertexts
+For LWE-based schemes, a ciphertext is $(a, b) \in \mathbb{Z}_q^n \times \mathbb{Z}_q$ where:
+$$b = \langle a, s \rangle + \Delta \cdot m + e \pmod{q}$$
+
+with:
+- $s$ = secret key
+- $\Delta = \lfloor q/t \rfloor$ = scaling factor (for plaintext modulus $t$)
+- $m$ = plaintext message
+- $e$ = noise term (must satisfy $|e| < \Delta/2$ for correct decryption)
+
+**Noise Growth Formulas:**
+
+| Operation | Noise After Operation | Growth Rate |
+|-----------|----------------------|-------------|
+| **Encryption** | $\|e_0\| \approx \sigma$ | Initial (small) |
+| **Addition** | $\|e_{add}\| \leq \|e_1\| + \|e_2\|$ | Linear |
+| **Scalar Mult** | $\|e_{scalar}\| \leq k \cdot \|e\|$ | Linear in scalar |
+| **Ciphertext Mult** | $\|e_{mult}\| \leq \|e_1\| \cdot \|m_2\| + \|e_2\| \cdot \|m_1\| + \|e_1\| \cdot \|e_2\|$ | **Multiplicative** |
+| **Relinearization** | Adds $\|e_{relin}\| \approx n \cdot B \cdot \sigma$ | Fixed cost |
+| **Bootstrapping** | Resets to $\|e_{boot}\| \approx \sigma_{boot}$ | Constant (refresh) |
+
+**Noise Budget:**
+
+The noise budget $\beta$ is the remaining capacity before decryption fails:
+
+$$\beta = \log_2\left(\frac{q}{2 \cdot e_{current}}\right) \text{ bits}$$
+
+- **Decryption succeeds** when $\beta > 0$
+- **Decryption fails** when $\beta \leq 0$ (noise exceeds threshold)
+- Multiplication roughly **halves** the noise budget
+
+**TFHE Bootstrapping (Unique Property):**
+
+TFHE's programmable bootstrapping resets noise while evaluating a lookup table:
+
+$$\text{Bootstrap}(c) \rightarrow c' \text{ with } \|e'\| = O(\sigma_{boot})$$
+
+This enables **unlimited depth** computation (at cost of ~10ms per bootstrap).
+
+**Security Implications:**
+
+| Failure Mode | Consequence | Detection |
+|--------------|-------------|-----------|
+| Noise overflow (undetected) | **Silent wrong answer** | None—catastrophic |
+| Noise overflow (detected) | Decryption refuses | Explicit error |
+| Near-threshold noise | Probabilistic decryption errors | Intermittent failures |
+
+> [!WARNING]
+> **Audit Critical**: Some FHE implementations return incorrect results on noise overflow without any error. This is the FHE equivalent of integer overflow—but **cannot be fixed with require statements** (would leak information).
 
 ### 4. Parameter Selection Pitfalls
 
-| Parameter Issue | Vulnerability |
-|----------------|---------------|
-| Small modulus | Noise overflow, incorrect decryption |
-| Large modulus | Weakened security margin |
-| Wrong ring dimension | Lattice attack susceptibility |
-| Insufficient bootstrapping | Noise accumulation |
+**Formal Parameter Relationships:**
 
-## Security Guarantees and Limitations
+| Parameter | Symbol | Security Impact | Performance Impact |
+|-----------|--------|-----------------|-------------------|
+| Ring dimension | $n$ | ↑ increases security | ↓ decreases speed |
+| Ciphertext modulus | $q$ | ↓ too large weakens security | ↑ increases noise budget |
+| Error std dev | $\sigma$ | ↑ increases security | ↓ decreases noise budget |
+| Plaintext modulus | $t$ | — | ↑ increases message space, ↓ decreases $\Delta$ |
 
-### IND-CPA (Indistinguishability under Chosen Plaintext Attack)
+**Critical Ratios:**
 
-Standard FHE security guarantee:
-- Attacker cannot distinguish encryptions of different messages
-- Does NOT protect against chosen ciphertext attacks (IND-CCA)
-- FHE schemes are inherently malleable and typically achieve only IND-CPA security
+- **Security**: $n \cdot \log_2(q/\sigma)$ must exceed $\lambda \cdot \log_2(\delta^{-1})$
+- **Correctness**: $q/t$ must be large enough for noise headroom
+- **Overstretching danger**: $\log_2(q) / n > 1$ may enable subfield attacks
 
-**Security Level**: Modern FHE implementations target 128-bit IND-CPA security:
-- Based on quantum-resistant lattice assumptions (LWE/RLWE)
-- Resistant to all known classical and quantum attacks
-- Zama and Fhenix both target 128-bit security parameters
+**Common Mistakes:**
+
+| Mistake | Consequence | How to Detect |
+|---------|-------------|---------------|
+| Copying parameters between schemes | Security/correctness fail | Verify with lattice estimator |
+| Sparse/ternary secrets with standard params | Reduced security by 20-40 bits | Check secret distribution |
+| Ignoring type width in smart contracts | Overflow wrapping | Static analysis of euint types |
+
+## Security Guarantees Summary
+
+FHE provides **IND-CPA security** (formal definitions in §2.1) with these practical implications:
+
+| Security Aspect | Status | Notes |
+|----------------|--------|-------|
+| Ciphertext indistinguishability | ✅ Guaranteed | Attacker cannot distinguish encryptions |
+| Quantum resistance | ✅ Yes | Based on lattice hardness (LWE/RLWE) |
+| CCA security | ❌ Not achievable | FHE is inherently malleable by design |
+| IND-CPAD (threshold decryption) | ⚠️ Requires mitigation | Noise flooding mandatory |
 
 > [!WARNING]
-> **Fundamental Limitation**: FHE is inherently malleable. An attacker can modify ciphertexts to compute on the underlying data without knowing the plaintext. This is by design (enabling computation), but requires careful access control and authentication mechanisms at the application layer.
+> **Fundamental Limitation**: FHE is inherently malleable—attackers can compute on ciphertexts without knowing plaintexts. This is by design (enabling computation), but requires **ACL enforcement** at the application layer.
 
 ---
 
@@ -331,18 +546,6 @@ graph TB
         B --> C[fhEVM<br/>Encrypted EVM]
         C --> D[Blockchain Integration]
     end
-    
-    subgraph "Security Audits"
-        E[Trail of Bits]
-        F[OpenZeppelin]
-        G[Zenith]
-        H[Burrasec]
-    end
-    
-    C --> E
-    C --> F
-    C --> G
-    C --> H
 ```
 
 ### Stack Components
@@ -584,7 +787,7 @@ contract ConfidentialToken {
 
 ## dBFV Scheme (Decomposed BFV)
 
-Fhenix's novel contribution from their [white paper](https://eprint.iacr.org/2025/2321):
+A technique for high-precision exact FHE:
 
 ### Security Improvements Over Standard BFV
 
@@ -1471,10 +1674,10 @@ contract SecureBlindAuction {
         highestBid = FHE.select(isNewHighest, transferred, highestBid);
         bids[msg.sender] = FHE.add(bids[msg.sender], transferred);
         
-        // Store bidder (can't use encrypted select for address)
-        if (/* determined via separate reveal mechanism */) {
-            highestBidder = msg.sender;
-        }
+        // Note: Address of highest bidder is tracked separately
+        // In production, use a mapping of bid -> address and resolve
+        // during the reveal phase after finality delay
+        _recordBidder(msg.sender, transferred);
     }
     
     function endAuction() external {
@@ -2162,24 +2365,28 @@ rule noUnauthorizedIncrease(address user) {
 
 ## Current Ecosystem Projects
 
-### Production Applications
+### Application Categories
 
-| Project | Description | Security Model |
-|---------|-------------|----------------|
-| **AlphaEngine** | Encrypted trading platform | CoFHE + TEE hybrid |
-| **Fluton** | Real-world FHE showcase | Standard CoFHE |
-| **Lunarys** | DEX with FHE capabilities | Order book encryption |
-| **Felend** | FHE-enabled lending | Collateral privacy |
-| **Privara** | Privacy platform | Multi-layer encryption |
+FHE-enabled Web3 applications typically fall into these categories:
 
-### Design Partner Case Studies
+| Category | Description | Security Considerations |
+|----------|-------------|------------------------|
+| **Confidential DeFi** | Trading, lending, DEX with encrypted state | Order book privacy, MEV protection |
+| **Private Governance** | Encrypted voting and proposals | Vote privacy, threshold reveal |
+| **Confidential Tokens** | FHERC20-style encrypted balances | ACL management, overflow handling |
+| **Sealed-Bid Auctions** | Hidden bids until reveal | Finality delays, replay protection |
 
-**Private Prediction Market:**
+> [!NOTE]
+> For current production applications, refer to the official documentation of [Fhenix](https://docs.fhenix.io/) and [Zama](https://docs.zama.ai/) for up-to-date ecosystem projects.
+
+### Design Pattern Case Studies
+
+**Private Prediction Market Pattern:**
 - Challenge: Hide bet amounts until resolution
 - Solution: Encrypted positions with threshold reveal
 - Security: Two-step reveal with finality delay
 
-**Confidential Credit Scoring:**
+**Confidential Credit Scoring Pattern:**
 - Challenge: Compute credit score without revealing data
 - Solution: FHE computation on encrypted financial history
 - Security: Zero-knowledge proof of computation correctness
@@ -2252,10 +2459,13 @@ rule noUnauthorizedIncrease(address user) {
 
 ### Security Bounties
 
-| Protocol | Bounty Program | Max Payout |
+> [!NOTE]
+> Bug bounty amounts and programs change frequently. Always verify current bounty details from official sources.
+
+| Protocol | Bounty Program | Verify At |
 |----------|---------------|------------|
-| Fhenix | Immunefi | Up to $100k |
-| Zama | Direct submission | Project-dependent |
+| Fhenix | Immunefi | [immunefi.com](https://immunefi.com/) |
+| Zama | Direct submission | [zama.ai](https://www.zama.ai/) |
 
 ### Auditing Opportunities
 
@@ -2754,6 +2964,145 @@ contract VersionAwareFHE {
 
 ---
 
+# Chapter 9: Open Research Problems & Limitations
+
+This section documents **unsolved problems** and **fundamental limitations** in FHE for Web3. Honest acknowledgment of these gaps is essential for scientific rigor.
+
+## 9.1 Verifiable FHE Computation
+
+**Problem**: How do we prove that an FHE coprocessor computed correctly without trusting it?
+
+**Current State:**
+- Zama fhEVM and Fhenix CoFHE rely on **trusted coprocessors**
+- Malicious coprocessor could return incorrect results
+- ZK proofs of FHE computation are theoretically possible but **prohibitively expensive**
+
+**Research Directions:**
+| Approach | Status | Challenge |
+|----------|--------|-----------|
+| ZK-SNARKs for FHE | In development | Proof generation ~1000x slower than FHE |
+| Optimistic verification | Proposed | Requires fraud proofs on encrypted data |
+| Multi-coprocessor consensus | Proposed | Coordination overhead, trust assumptions |
+| Verifiable arithmetic circuits | Research | Limited to specific operations |
+
+**References:**
+- [Verifiable FHE](https://eprint.iacr.org/2021/1402) - Initial feasibility study
+- [RISC Zero + FHE](https://www.risczero.com/) - Potential integration path
+
+> [!IMPORTANT]
+> **Current Audit Stance**: FHE coprocessor trust is a **documented limitation**, not a vulnerability. Audits should verify the threat model acknowledges this.
+
+---
+
+## 9.2 Side-Channel Hardening
+
+**Problem**: FHE operations are complex and may leak information through side channels.
+
+**Known Challenges:**
+
+| Attack Vector | Mitigation Status | Open Questions |
+|---------------|-------------------|----------------|
+| Timing attacks | Partially mitigated | Bootstrapping reveals circuit depth |
+| Cache-timing | Active research | Memory access patterns during NTT |
+| Power analysis | Hardware-dependent | FHE accelerators create new surfaces |
+| EM emissions | Not addressed | Especially on custom hardware |
+
+**Specific Concerns for Web3:**
+- Running FHE in TEEs (e.g., Intel SGX) introduces **combined attack surfaces**
+- GPU/FPGA acceleration changes side-channel profile
+- Cloud deployment exposes to hypervisor-level attacks
+
+**Research Gap**: No formal side-channel security model for FHE exists.
+
+---
+
+## 9.3 Threshold Key Generation Security
+
+**Problem**: Distributedly generating FHE keys is harder than RSA/EC distributed key gen.
+
+**Attack Surfaces in DKG for FHE:**
+
+| Component | Risk | Current Mitigation |
+|-----------|------|-------------------|
+| Share reconstruction | Collusion of $t$ parties | Threshold security assumption |
+| Key share refresh | Proactive security needed | Complex protocols, not widely deployed |
+| Malicious participant detection | Byzantine fault tolerance | Verifiable secret sharing (VSS) |
+| Network partitioning | Split-brain scenarios | Consensus layer dependency |
+
+**Open Questions:**
+- What happens when DKG participants disagree during FHE computation?
+- How to rotate FHE keys without re-encrypting all historical data?
+- Optimal threshold $(t, n)$ for security vs. availability?
+
+---
+
+## 9.4 Cross-Chain FHE Security
+
+**Problem**: Using FHE across multiple blockchains introduces new attack vectors.
+
+**Challenges:**
+
+| Issue | Description | Severity |
+|-------|-------------|----------|
+| Ciphertext replay | Same ciphertext valid on multiple chains | High |
+| Key domain separation | Different chains may share key material | Critical |
+| Bridge custody | Bridge holds decryption capability | Critical |
+| Finality differences | Consensus on one chain, not on another | Medium |
+
+**No Standardized Solution Exists.**
+
+---
+
+## 9.5 Formal Verification Tooling
+
+**Problem**: No mature tools exist for formally verifying FHE smart contract correctness.
+
+**Current State:**
+
+| Tool | FHE Support | Limitations |
+|------|-------------|-------------|
+| Certora | Custom specs needed | No native encrypted type support |
+| Echidna | Requires mocks | Cannot test actual FHE operations |
+| Slither | Limited | No FHE-specific detectors |
+| Mythril | None | Symbolic execution fails on encrypted types |
+
+**Research Needed:**
+- Type systems for encrypted data flow
+- Symbolic execution over ciphertext handles
+- Property-based specification languages for FHE invariants
+
+---
+
+## 9.6 CKKS Precision vs. Security Trade-off
+
+**Problem**: CKKS (approximate HE) offers performance benefits but inherent security risks.
+
+**Fundamental Tension:**
+
+$$\text{Precision} \propto \text{Noise Exposure} \propto \text{Key Recovery Risk}$$
+
+- Higher precision → smaller noise flooding → easier CPAD attacks
+- Aggressive noise flooding → unusable precision for ML
+
+**Current Guidance**: Avoid CKKS for threshold decryption unless noise flooding is rigorously analyzed. Prefer exact schemes (BFV, BGV, TFHE) for Web3.
+
+---
+
+## 9.7 Summary of Limitations
+
+| Limitation | Impact | Mitigation Timeframe |
+|------------|--------|---------------------|
+| Trusted coprocessor | Protocol trust assumption | 2-5 years (ZK-FHE) |
+| Side-channel leakage | Implementation trust assumption | Ongoing research |
+| DKG complexity | Key rotation challenges | 1-3 years |
+| Cross-chain security | No standard exists | Unknown |
+| Verification tooling | Audit difficulty | 2-3 years |
+
+> [!NOTE]
+> **For Auditors**: These limitations should be documented in the audit scope. They are not vulnerabilities but accepted trust assumptions that clients must understand.
+
+---
+
 # Appendices
 
 ## Appendix A: Vulnerability Reference Quick Guide
@@ -2923,13 +3272,13 @@ contract VersionAwareFHE {
 
 ### Security Audit Reports
 
-| Audit | Auditor | Scope | Year |
-|-------|---------|-------|------|
-| Zama Protocol (~70 audit-weeks) | Trail of Bits, OpenZeppelin, Zenith, Burrasec | TFHE-rs, fhEVM, KMS, Gateway | 2024 |
-| Fhenix CoFHE | Pending/TBA | Threshold Decryption Network | 2025 |
+| Audit | Auditor | Scope | Status |
+|-------|---------|-------|--------|
+| Zama Protocol | Trail of Bits, OpenZeppelin, Zenith, Burrasec | TFHE-rs, fhEVM, KMS, Gateway | Published (~70 audit-weeks) |
+| Fhenix CoFHE | - | Threshold Decryption Network | Check official documentation |
 
 > [!NOTE]
-> Zama's ~70 audit-weeks makes TFHE-rs the first professionally audited FHE library. Audit reports available at [zama.org/blog](https://www.zama.org/blog).
+> Zama's ~70 audit-weeks makes TFHE-rs one of the most extensively audited FHE libraries. For the latest audit reports and security updates, check [zama.ai/blog](https://www.zama.ai/blog) and [docs.fhenix.io](https://docs.fhenix.io/).
 
 ### Official Documentation
 
