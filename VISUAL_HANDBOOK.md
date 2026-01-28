@@ -1,5 +1,7 @@
 # FHE Security Handbook
 
+![FHE Security Handbook Hero](./images/hero.png)
+
 **A Security-Focused Guide to Fully Homomorphic Encryption for Web3 Protocols**
 
 *Aligned with Zama fhEVM, Fhenix CoFHE, and Web3 Security Best Practices*
@@ -31,23 +33,27 @@
 
 **Fully Homomorphic Encryption (FHE)** is a cryptographic technique that allows computations to be performed directly on encrypted data without ever decrypting it. The result of any computation remains encrypted and can only be decrypted by the holder of the secret key.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Traditional Encryption                    │
-├─────────────────────────────────────────────────────────────┤
-│  Encrypt(data) → ciphertext                                 │
-│  Decrypt(ciphertext) → data                                 │
-│  Compute(data) → result  ← Data exposed during computation! │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Traditional["Traditional Encryption"]
+        direction TB
+        T1[Encrypt] --> T2[ciphertext]
+        T2 --> T3[Decrypt]
+        T3 --> T4[data]
+        T4 --> T5[Compute]
+        T5 -- "Data exposed!" --> T6[result]
+        style T5 fill:#ffcccc,stroke:#ff0000
+    end
 
-┌─────────────────────────────────────────────────────────────┐
-│                   Homomorphic Encryption                     │
-├─────────────────────────────────────────────────────────────┤
-│  Encrypt(data) → ciphertext                                 │
-│  Compute(ciphertext) → encrypted_result                     │
-│  Decrypt(encrypted_result) → result                         │
-│  ↑ Data NEVER exposed during computation!                   │
-└─────────────────────────────────────────────────────────────┘
+    subgraph Homomorphic["Homomorphic Encryption"]
+        direction TB
+        H1[Encrypt] --> H2[ciphertext]
+        H2 --> H3[Compute]
+        H3 --> H4[encrypted_result]
+        H4 --> H5[Decrypt]
+        H5 -- "Data NEVER exposed!" --> H6[result]
+        style H3 fill:#ccffcc,stroke:#00ff00
+    end
 ```
 
 ### Why FHE Matters for Web3
@@ -291,6 +297,8 @@ FHE security reduces to the hardness of lattice problems. Understanding these is
 
 **Learning With Errors (LWE) Problem:**
 
+![LWE Visualization](./images/lwe_visual.png)
+
 Given $m$ samples $(a_i, b_i) \in \mathbb{Z}_q^n \times \mathbb{Z}_q$ where:
 
 $$b_i = \langle a_i, s \rangle + e_i \pmod{q}$$
@@ -439,6 +447,18 @@ Recent research (2024) has demonstrated practical key recovery against major FHE
 
 ### 3. Noise Growth Analysis (Formal)
 
+```mermaid
+xychart-beta
+    title "Noise Growth vs Operations"
+    x-axis ["Init", "Add", "Mult", "Mult", "Bootstrap", "Add"]
+    y-axis "Noise Level (bits)" 0 --> 100
+    line [10, 11, 25, 55, 12, 13]
+```
+
+> [!TIP]
+> **Visualizing Noise**: Think of noise as "dust" on a radio signal. Adding signals adds a bit of dust. Multiplying signals explodes the dust. Bootstrapping is like a "filter" that cleans the signal back to a baseline level.
+
+
 FHE ciphertexts contain "noise" $e$ that grows with each operation. Understanding noise growth is critical for both security and correctness.
 
 **Ciphertext Structure:**
@@ -474,6 +494,19 @@ $$\beta = \log_2\left(\frac{q}{2 \cdot e_{current}}\right) \text{ bits}$$
 - Multiplication roughly **halves** the noise budget
 
 **TFHE Bootstrapping (Unique Property):**
+
+```mermaid
+flowchart LR
+    subgraph Bootstrapping["Bootstrapping (Programmable)"]
+        direction LR
+        In[Ciphertext with Noise] -->|Blind Rotate| Acc[Accumulator]
+        LUT[Lookup Table / Function f(x)] -.-> Acc
+        Acc -->|Sample Extract| Out[Ciphertext of f(x) with Low Noise]
+    end
+    style In fill:#ffcccc,stroke:#ff0000
+    style Out fill:#ccffcc,stroke:#00ff00
+    style LUT fill:#e1f5fe
+```
 
 TFHE's programmable bootstrapping resets noise while evaluating a lookup table:
 
@@ -597,17 +630,24 @@ Zama's protocol has undergone security audits. For the most current and verified
 
 ### Modified EVM Design
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         fhEVM                                │
-├─────────────────────────────────────────────────────────────┤
-│  Standard EVM Opcodes    │  FHE Precompiles                 │
-│  ─────────────────────   │  ─────────────────               │
-│  ADD, MUL, CALL, etc.    │  FHE.add(euint, euint)           │
-│                          │  FHE.mul(euint, euint)           │
-│                          │  FHE.select(ebool, euint, euint) │
-│                          │  FHE.decrypt(...)                 │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph fhEVM["fhEVM Extended Architecture"]
+        direction TB
+        subgraph Standard["Standard EVM Layer"]
+            direction TB
+            OP1[ADD] ~~~ OP2[MUL] ~~~ OP3[SSTORE]
+            desc1[Executes on plaintext data]
+        end
+        
+        subgraph FHE["FHE Precompile Layer"]
+            direction TB
+            P1["FHE.add(euint, euint)"] ~~~ P2["FHE.mul(euint, euint)"] ~~~ P3["FHE.verify(...)"]
+            desc2[Executes on encrypted data (TFHE-rs)]
+        end
+        
+        Standard <-->|"Interoperable State"| FHE
+    end
 ```
 
 ### Encrypted Types
@@ -2365,7 +2405,61 @@ rule noUnauthorizedIncrease(address user) {
 
 ---
 
-# Chapter 8: Ecosystem, Research & Future Directions
+# Chapter 9: Open Research Problems & Limitations
+
+<details>
+<summary>Click to expand: Current Limitations & Research Frontiers</summary>
+
+## Fundamental Limitations for Web3 Integration
+
+### 1. The "Public Data" Paradox
+
+**Problem**: Blockchains are useful because data is public and verifiable. FHE makes data private and opaque. This breaks:
+- Block explorers (Etherscan becomes useless for data inspection)
+- Indexers (The Graph cannot index encrypted events)
+- Wallet UX (Metamask cannot display encrypted token balances without keys)
+
+**Current Solution**: Client-side decryption and "view" permits.
+**Research Frontier**: **Verifiable FHE Viewers** that allow limited, proven queries over encrypted state without full decryption.
+
+### 2. The "30ms Block Time" Dream
+
+**Problem**: Solana aims for 400ms blocks; parallel EVMs aim for sub-second. TFHE bootstrapping takes ~10-20ms *per bit*.
+- A simple `uint64` multiplication might take 50-100ms.
+- A complex contract interaction could take seconds.
+- FHE prevents "synchronous composability" with high-speed chains.
+
+**Research Frontier**: **Hardware Acceleration (ASICs)** for FHE (e.g., stored FHE accelerators).
+- Goal: 1000x speedup primarily for bootstrapping and NTT operations.
+- Status: FPGA prototypes exist; ASICs expected 2025-2026.
+
+### 3. Threshold Network Centralization
+
+**Problem**: The security of current solutions (Zama KMS, Fhenix TDN) relies on a small set of semi-trusted validators holding key shares.
+- If threshold is $t$ of $n$, and $t$ collude, ALL data is exposed.
+- Current $n$ is small (e.g., 4-10 nodes).
+
+**Research Frontier**: **Multi-Key FHE (MK-FHE)**
+- Allows computation on data encrypted with *different* keys.
+- Removing the need for a global threshold key.
+- *Challenge*: Computation is much slower (quadratic in number of parties).
+
+## Advanced Cryptographic challenges
+
+### 1. IND-CCA2 for FHE
+
+**Problem**: As discussed in Chapter 2, standard FHE is malleable (IND-CPA only).
+**Research**: Can we construct efficient FHE that is CCA-secure?
+- *Zero-Knowledge Proofs of Plaintext Knowledge (ZKPoPK)*: Sender proves they know the plaintext $m$ and randomness $r$ effectively "freezing" the ciphertext.
+- *Status*: Possible but adds massive overhead (ZK proof generation on client).
+
+### 2. Malicious Security for MPC/Threshold Decryption
+
+**Problem**: Current threshold decryption often assumes "semi-honest" (honest-but-curious) nodes. Malicious nodes could inject faults to recover keys (see IND-CPAD attacks).
+**Research**: Efficient robust threshold decryption verifying correctness of partial decryptions.
+- *Status*: ZK-proofs of decryption correctness (Verifiable Decryption).
+
+</details>
 
 ## Current Ecosystem Projects
 
@@ -2965,6 +3059,33 @@ contract VersionAwareFHE {
 - [ ] Verify ciphertext operations work correctly
 - [ ] Document migration for audit trail
 ```
+
+---
+
+# Chapter 8: Ecosystem, Research & Future Directions
+<details>
+<summary>Click to expand: Current Ecosystem Projects</summary>
+
+## Current Ecosystem Projects
+
+### Zama (The TFHE Stack)
+- **tfhe-rs**: Rust implementation of TFHE.
+- **Concrete**: Compiler from Python/ML to TFHE.
+- **fhEVM**: EVM with TFHE precompiles.
+
+### Fhenix (The L2 Solution)
+- **Fhenix Chain**: Optimistic rollup (using Arbitrum Nitro) with FHE coprocessors.
+- **CoFHE**: Coprocessor architecture for off-chain FHE execution.
+
+### Inco Network
+- **Native L1**: FHE-enabled Layer 1 blockchain.
+- **Interoperability**: Focuses on cross-chain confidential state (Confidential ERC-20 bridged to Ethereum).
+
+### Sunscreen
+- **Compiler**: Web3-native compiler for FHE (using BFV/CKKS).
+- **ZKP Integration**: Focus on proving correct FHE execution.
+
+</details>
 
 ---
 
