@@ -635,18 +635,16 @@ graph TB
     subgraph fhEVM["fhEVM Extended Architecture"]
         direction TB
         subgraph Standard["Standard EVM Layer"]
-            direction TB
-            OP1[ADD] ~~~ OP2[MUL] ~~~ OP3[SSTORE]
-            desc1[Executes on plaintext data]
+            OP1["ADD, MUL, SSTORE, etc."]
+            desc1["Executes on plaintext data"]
         end
         
         subgraph FHE["FHE Precompile Layer"]
-            direction TB
-            P1["FHE.add(euint, euint)"] ~~~ P2["FHE.mul(euint, euint)"] ~~~ P3["FHE.verify(...)"]
-            desc2[Executes on encrypted data (TFHE-rs)]
+            P1["FHE.add, FHE.mul, FHE.verify"]
+            desc2["Executes on encrypted data"]
         end
         
-        Standard <-->|"Interoperable State"| FHE
+        Standard <--> FHE
     end
 ```
 
